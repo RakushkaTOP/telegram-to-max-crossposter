@@ -1,0 +1,35 @@
+services:
+  # Локальный Telegram Bot API — нужен, чтобы качать видео >20 МБ (облачный лимит).
+  bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: crosspost-bot-api
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: "1"
+    volumes:
+      - botapi_data:/var/lib/telegram-bot-api
+    # порт наружу не публикуем — общаемся по внутренней сети compose (bot-api:8081)
+    expose:
+      - "8081"
+
+  worker:
+    build: ./worker
+    image: crosspost-worker:latest
+    container_name: crosspost-tg-worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TG_API_BASE: http://bot-api:8081
+      TG_FILES_ROOT: /var/lib/telegram-bot-api
+      DB_PATH: /data/crosspost.db
+    volumes:
+      - botapi_data:/var/lib/telegram-bot-api:ro   # тот же том, чтобы читать скачанные файлы
+      - worker_data:/data
+    depends_on:
+      - bot-api
+
+volumes:
+  botapi_data:
+  worker_data:
