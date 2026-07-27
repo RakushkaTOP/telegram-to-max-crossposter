@@ -21,7 +21,7 @@ class Config:
     max_token: str               # access-токен бота MAX
     max_chat_id: int             # ID канала-приёмника в MAX (напр. -72627929529786)
     max_api_base: str            # база REST API MAX
-    max_chat_id_in_query: bool   # слать chat_id в query (совместимость) или в теле
+    max_chat_id_in_query: bool   # слать chat_id в query (рабочий способ) или в теле
 
     # --- поведение ---
     album_debounce_ms: int       # сколько ждать сборки альбома
@@ -37,7 +37,8 @@ class Config:
             max_token=_clean(os.getenv("MAX_TOKEN")),
             max_chat_id=int(_clean(os.getenv("MAX_CHAT_ID")) or "0"),
             max_api_base=_clean(os.getenv("MAX_API_BASE")) or "https://botapi.max.ru",
-            max_chat_id_in_query=_clean(os.getenv("MAX_CHAT_ID_IN_QUERY")).lower() in ("1", "true", "yes"),
+            # по умолчанию true: chat_id в теле MAX отвергает как "Unknown recipient" (проверено 2026-07-27)
+            max_chat_id_in_query=(_clean(os.getenv("MAX_CHAT_ID_IN_QUERY")) or "true").lower() in ("1", "true", "yes"),
             album_debounce_ms=int(_clean(os.getenv("ALBUM_DEBOUNCE_MS")) or "1500"),
             db_path=_clean(os.getenv("DB_PATH")) or "/data/crosspost.db",
         )

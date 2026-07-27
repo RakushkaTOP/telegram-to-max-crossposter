@@ -102,10 +102,12 @@ class MaxClient:
             return MaxClient._extract_token(res)
         return None
 
-    async def send(self, text: str, attachments: list[dict[str, Any]] | None) -> bool:
+    def _message_request(self, text: str, attachments: list[dict[str, Any]] | None,
+                         chat_id_in_query: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Собирает (params, body) для POST /messages при выбранном способе адресации."""
         body: dict[str, Any] = {}
         params: dict[str, Any] = {}
-        if self._chat_id_in_query:
+        if chat_id_in_query:
             params["chat_id"] = self._chat_id
         else:
             body["chat_id"] = self._chat_id
@@ -113,9 +115,25 @@ class MaxClient:
             body["text"] = text
         if attachments:
             body["attachments"] = attachments
+        return params, body
+
+    async def send(self, text: str, attachments: list[dict[str, Any]] | None) -> bool:
         if not text and not attachments:
             return True  # нечего слать
+        params, body = self._message_request(text, attachments, self._chat_id_in_query)
         r = await self._http.post(f"{self._base}/messages", params=params, json=body)
+        # Проверено на живом API 2026-07-27: chat_id В ТЕЛЕ даёт 400 "Unknown recipient",
+        # рабочий способ — query. Если сервер не узнал адресата, пробуем второй способ,
+        # чтобы смена формата на их стороне не роняла кросспост молча.
+        if r.status_code == 400 and "recipient" in r.text.lower():
+            alt = not self._chat_id_in_query
+            log.warning("MAX не узнал адресата (chat_id_in_query=%s) — повтор с chat_id_in_query=%s",
+                        self._chat_id_in_query, alt)
+            params, body = self._message_request(text, attachments, alt)
+            r = await self._http.post(f"{self._base}/messages", params=params, json=body)
+            if r.status_code < 300:
+                self._chat_id_in_query = alt  # запоминаем рабочий способ до конца жизни процесса
+                log.warning("рабочий способ адресации: chat_id_in_query=%s — поправь MAX_CHAT_ID_IN_QUERY в .env", alt)
         if r.status_code >= 300:
             log.error("send failed %s: %s", r.status_code, r.text[:500])
             return False
