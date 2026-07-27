@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -32,6 +33,9 @@ UPLOAD_TYPE = {
 
 
 class MaxClient:
+    # сколько раз ждать, пока MAX дожуёт загруженное видео (attachment.not.ready)
+    NOT_READY_ATTEMPTS = 12
+
     def __init__(self, token: str, base: str, chat_id: int, chat_id_in_query: bool = False) -> None:
         self._token = token
         self._base = base.rstrip("/")
@@ -117,11 +121,32 @@ class MaxClient:
             body["attachments"] = attachments
         return params, body
 
+    async def _post_once(self, text: str, attachments: list[dict[str, Any]] | None) -> httpx.Response:
+        """POST /messages с ожиданием готовности вложений.
+
+        MAX обрабатывает загруженное медиа асинхронно (особенно видео): сразу после
+        /uploads токен ещё «сырой», и сервер отвечает 400 attachment.not.ready.
+        Это не ошибка, а «подожди» — повторяем, пока не дозреет.
+        """
+        params, body = self._message_request(text, attachments, self._chat_id_in_query)
+        delay = 2.0
+        for attempt in range(1, self.NOT_READY_ATTEMPTS + 1):
+            r = await self._http.post(f"{self._base}/messages", params=params, json=body)
+            if not (r.status_code == 400 and "not.ready" in r.text):
+                return r
+            if attempt == self.NOT_READY_ATTEMPTS:
+                log.error("вложение так и не дозрело за %d попыток", attempt)
+                return r
+            log.info("вложение ещё обрабатывается на стороне MAX — попытка %d/%d через %.0fс",
+                     attempt, self.NOT_READY_ATTEMPTS, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 15.0)
+        return r  # недостижимо, но пусть тип будет честным
+
     async def send(self, text: str, attachments: list[dict[str, Any]] | None) -> bool:
         if not text and not attachments:
             return True  # нечего слать
-        params, body = self._message_request(text, attachments, self._chat_id_in_query)
-        r = await self._http.post(f"{self._base}/messages", params=params, json=body)
+        r = await self._post_once(text, attachments)
         # Проверено на живом API 2026-07-27: chat_id В ТЕЛЕ даёт 400 "Unknown recipient",
         # рабочий способ — query. Если сервер не узнал адресата, пробуем второй способ,
         # чтобы смена формата на их стороне не роняла кросспост молча.
@@ -134,18 +159,44 @@ class MaxClient:
             if r.status_code < 300:
                 self._chat_id_in_query = alt  # запоминаем рабочий способ до конца жизни процесса
                 log.warning("рабочий способ адресации: chat_id_in_query=%s — поправь MAX_CHAT_ID_IN_QUERY в .env", alt)
+        # Альбом одним сообщением — предпочтительно, но MAX может не принять пачку
+        # (особенно разнотипную: фото+видео). Тогда лучше разложить на отдельные
+        # сообщения, чем потерять пост целиком.
+        if r.status_code >= 300 and attachments and len(attachments) > 1:
+            kinds = {a.get("type") for a in attachments}
+            log.warning("альбом (%d вложений, типы %s) не принят: %s %s — раскладываю по одному",
+                        len(attachments), sorted(k for k in kinds if k), r.status_code, r.text[:200])
+            return await self._send_split(text, attachments)
         if r.status_code >= 300:
             log.error("send failed %s: %s", r.status_code, r.text[:500])
             return False
-        mid = None
-        try:
-            body_resp = r.json()
-            msg = (body_resp or {}).get("message") or {}
-            mid = (msg.get("body") or {}).get("mid") or msg.get("mid")
-        except Exception:
-            pass
-        log.info("MAX ← отправлено (attachments=%d, text=%d) mid=%s", len(attachments or []), len(text or ""), mid)
+        log.info("MAX ← отправлено (attachments=%d, text=%d) mid=%s",
+                 len(attachments or []), len(text or ""), self._mid_of(r))
         return True
+
+    async def _send_split(self, text: str, attachments: list[dict[str, Any]]) -> bool:
+        """Фолбэк для альбома: каждое вложение — отдельным сообщением (текст идёт с первым)."""
+        sent = 0
+        for i, att in enumerate(attachments):
+            r = await self._post_once(text if i == 0 else "", [att])
+            if r.status_code >= 300:
+                log.error("split-часть %d/%d не отправлена: %s %s",
+                          i + 1, len(attachments), r.status_code, r.text[:300])
+                continue
+            sent += 1
+            log.info("MAX ← отправлена часть %d/%d mid=%s", i + 1, len(attachments), self._mid_of(r))
+        if sent:
+            log.info("альбом доставлен по частям: %d из %d", sent, len(attachments))
+        return sent > 0
+
+    @staticmethod
+    def _mid_of(r: httpx.Response) -> str | None:
+        """Достаёт mid отправленного сообщения — по нему можно удалить тестовый пост."""
+        try:
+            msg = (r.json() or {}).get("message") or {}
+            return (msg.get("body") or {}).get("mid") or msg.get("mid")
+        except Exception:  # noqa: BLE001
+            return None
 
     async def delete_message(self, mid: str) -> bool:
         """Удаляет сообщение в MAX по его mid (для очистки тестового поста)."""

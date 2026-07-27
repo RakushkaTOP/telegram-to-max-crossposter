@@ -141,11 +141,16 @@ async def _process(messages: list[Message]) -> None:
 
 
 async def _flush_album(group_id: str) -> None:
-    await asyncio.sleep(cfg.album_debounce_ms / 1000)
+    try:
+        await asyncio.sleep(cfg.album_debounce_ms / 1000)
+    except asyncio.CancelledError:
+        return  # приехал ещё один кадр альбома — отправку перенёс новый таймер
     bundle = _albums.pop(group_id, None)
     if not bundle:
         return
-    await _process(bundle["msgs"])
+    msgs = bundle.get("msgs") or []
+    log.info("альбом %s собран: %d сообщений", group_id, len(msgs))
+    await _process(msgs)
 
 
 @dp.channel_post(F.chat.id == cfg.tg_source_chat_id)
@@ -153,8 +158,13 @@ async def on_channel_post(m: Message) -> None:
     if m.media_group_id:
         b = _albums[m.media_group_id]
         b.setdefault("msgs", []).append(m)
-        if not b.get("task"):
-            b["task"] = asyncio.create_task(_flush_album(m.media_group_id))
+        # дебаунс скользящий: каждый новый кадр альбома отодвигает отправку.
+        # С фиксированным таймером от первого кадра большой альбом (или медленная
+        # доставка) разрывался бы на два поста в MAX.
+        task = b.get("task")
+        if task:
+            task.cancel()
+        b["task"] = asyncio.create_task(_flush_album(m.media_group_id))
         return
     await _process([m])
 
