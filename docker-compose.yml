@@ -35,7 +35,9 @@ services:
       TG_FILES_ROOT: /var/lib/telegram-bot-api
       DB_PATH: /data/crosspost.db
     volumes:
-      - botapi_data:/var/lib/telegram-bot-api:ro   # тот же том, чтобы читать скачанные файлы
+      # тот же том, чтобы читать скачанные файлы; на запись — чтобы удалять их
+      # после перезалива в MAX (Bot API сам свой кэш не чистит)
+      - botapi_data:/var/lib/telegram-bot-api
       - worker_data:/data
     depends_on:
       - bot-api

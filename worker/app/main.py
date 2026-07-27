@@ -68,9 +68,9 @@ def _text_of(m: Message) -> str:
     return (m.caption or m.text or "").strip()
 
 
-async def _read_local_file(file_id: str) -> tuple[bytes, str, str] | None:
+async def _read_local_file(file_id: str) -> tuple[bytes, str, str, str] | None:
     """Скачивает файл через локальный Bot API и читает его с диска.
-    Возвращает (bytes, filename, content_type)."""
+    Возвращает (bytes, filename, content_type, path_on_disk)."""
     try:
         f = await bot.get_file(file_id)
     except Exception as e:  # noqa: BLE001
@@ -88,21 +88,42 @@ async def _read_local_file(file_id: str) -> tuple[bytes, str, str] | None:
         if p and os.path.exists(p):
             with open(p, "rb") as fh:
                 data = fh.read()
-            return data, os.path.basename(p), "application/octet-stream"
+            return data, os.path.basename(p), "application/octet-stream", p
     log.error("файл не найден на диске: file_path=%s (пробовал %s)", path, candidates)
     return None
 
 
-async def _build_attachment(m: Message) -> dict[str, Any] | None:
+def _cleanup(paths: list[str]) -> None:
+    """Удаляет скачанные Bot API файлы.
+
+    Локальный Bot API складывает всё в свой том и НИКОГДА не чистит его сам —
+    на канале с видео это гарантированно съело бы диск (а на боксе рядом живут
+    другие сервисы). Файл нужен только до перезалива в MAX, дальше он мусор.
+    """
+    for p in paths:
+        # страховка: сносим только внутри тома Bot API, ничего снаружи
+        if not os.path.abspath(p).startswith(os.path.abspath(cfg.tg_files_root)):
+            log.warning("отказ удалять файл вне тома Bot API: %s", p)
+            continue
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning("не удалось удалить %s: %s", p, e)
+
+
+async def _build_attachment(m: Message) -> tuple[dict[str, Any] | None, str | None]:
+    """Возвращает (attachment для MAX, путь скачанного файла — его потом надо убрать)."""
     media = _extract_media(m)
     if not media:
-        return None
+        return None, None
     kind, file_id = media
     got = await _read_local_file(file_id)
     if not got:
-        return None
-    data, filename, ctype = got
-    return await maxc.upload_media(kind, filename, data, ctype)
+        return None, None
+    data, filename, ctype, path = got
+    return await maxc.upload_media(kind, filename, data, ctype), path
 
 
 async def _process(messages: list[Message]) -> None:
@@ -120,18 +141,27 @@ async def _process(messages: list[Message]) -> None:
             break
 
     attachments: list[dict[str, Any]] = []
+    downloaded: list[str] = []
     for m in messages:
-        att = await _build_attachment(m)
+        att, path = await _build_attachment(m)
+        if path:
+            downloaded.append(path)
         if att:
             attachments.append(att)
 
     if not text and not attachments:
         # нечего переносить (стикер/опрос/сервисное) — помечаем как обработанное
         store.mark(head.chat.id, head.message_id, int(time.time()))
+        _cleanup(downloaded)
         log.info("пропуск %s/%s: нет переносимого контента", head.chat.id, head.message_id)
         return
 
-    ok = await maxc.send(text, attachments)
+    try:
+        ok = await maxc.send(text, attachments)
+    finally:
+        # чистим и после провала: MAX всё равно уже получил копию либо пост потерян,
+        # а держать оригинал в томе Bot API смысла нет — только диск занимать
+        _cleanup(downloaded)
     if ok:
         for m in messages:
             store.mark(m.chat.id, m.message_id, int(time.time()))
