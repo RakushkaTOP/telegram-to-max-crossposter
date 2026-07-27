@@ -27,6 +27,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("crosspost")
+# httpx на INFO печатает полный URL каждого запроса — лишний шум в логах контейнера
+# (и риск утащить в них query-параметры). Ошибки транспорта видны и на WARNING.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 cfg = Config.load()
 cfg.require()
