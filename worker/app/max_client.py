@@ -108,5 +108,19 @@ class MaxClient:
         if r.status_code >= 300:
             log.error("send failed %s: %s", r.status_code, r.text[:500])
             return False
-        log.info("MAX ← отправлено (attachments=%d, text=%d)", len(attachments or []), len(text or ""))
+        mid = None
+        try:
+            body_resp = r.json()
+            msg = (body_resp or {}).get("message") or {}
+            mid = (msg.get("body") or {}).get("mid") or msg.get("mid")
+        except Exception:
+            pass
+        log.info("MAX ← отправлено (attachments=%d, text=%d) mid=%s", len(attachments or []), len(text or ""), mid)
         return True
+
+    async def delete_message(self, mid: str) -> bool:
+        """Удаляет сообщение в MAX по его mid (для очистки тестового поста)."""
+        r = await self._http.delete(f"{self._base}/messages", params={"message_id": mid})
+        ok = r.status_code < 300
+        log.info("MAX delete mid=%s -> %s %s", mid, r.status_code, "" if ok else r.text[:300])
+        return ok

@@ -160,6 +160,13 @@ async def main() -> None:
     me = await bot.get_me()
     log.info("старт: бот @%s, источник TG %s → MAX %s (api=%s)",
              me.username, cfg.tg_source_chat_id, cfg.max_chat_id, cfg.tg_api_base)
+    # ВАЖНО (прод): сбрасываем накопившуюся очередь апдейтов, чтобы при первом старте
+    # не задваивать/не заливать в MAX старые посты канала. Ловим только новое — с этого момента.
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        log.info("pending updates сброшены — ловим только новые посты")
+    except Exception as e:  # noqa: BLE001
+        log.warning("не удалось сбросить pending updates: %s", e)
     try:
         # только channel_post/edited_channel_post нужны
         await dp.start_polling(bot, allowed_updates=["channel_post", "edited_channel_post"])
