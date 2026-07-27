@@ -14,6 +14,11 @@ class Store:
         )
         self._db.commit()
 
+    def is_empty(self) -> bool:
+        """True, если ни один пост ещё не обработан — значит это первый старт."""
+        cur = self._db.execute("SELECT 1 FROM done LIMIT 1")
+        return cur.fetchone() is None
+
     def seen(self, chat_id: int, message_id: int) -> bool:
         cur = self._db.execute(
             "SELECT 1 FROM done WHERE chat_id=? AND message_id=?", (chat_id, message_id)

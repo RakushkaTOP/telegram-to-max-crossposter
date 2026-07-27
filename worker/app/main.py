@@ -160,13 +160,25 @@ async def main() -> None:
     me = await bot.get_me()
     log.info("старт: бот @%s, источник TG %s → MAX %s (api=%s)",
              me.username, cfg.tg_source_chat_id, cfg.max_chat_id, cfg.tg_api_base)
-    # ВАЖНО (прод): сбрасываем накопившуюся очередь апдейтов, чтобы при первом старте
-    # не задваивать/не заливать в MAX старые посты канала. Ловим только новое — с этого момента.
+    # самопроверка MAX-токена: чтобы при первом тесте сразу видеть, чей токен не тот
+    who = await maxc.whoami()
+    if who:
+        log.info("MAX-бот ok: %s", who.get("username") or who.get("name") or who)
+    else:
+        log.error("MAX-токен не прошёл проверку /me — кросспост будет падать на отправке")
+    # Очередь апдейтов сбрасываем ТОЛЬКО на первом старте (база дедупа пуста), чтобы
+    # не залить в MAX всю историю канала разом. На последующих рестартах сброс вреден:
+    # посты, пришедшие пока воркер лежал, потерялись бы. От задваивания страхует дедуп.
+    first_start = store.is_empty()
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        log.info("pending updates сброшены — ловим только новые посты")
+        await bot.delete_webhook(drop_pending_updates=first_start)
+        log.info(
+            "первый старт — pending updates сброшены, ловим только новые посты"
+            if first_start else
+            "рестарт — очередь апдейтов сохранена, догоним пропущенное (дедуп по sqlite)"
+        )
     except Exception as e:  # noqa: BLE001
-        log.warning("не удалось сбросить pending updates: %s", e)
+        log.warning("не удалось снять webhook: %s", e)
     try:
         # только channel_post/edited_channel_post нужны
         await dp.start_polling(bot, allowed_updates=["channel_post", "edited_channel_post"])

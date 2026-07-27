@@ -42,11 +42,35 @@ class MaxClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    def _auth(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Параметры запроса к API MAX с токеном.
+
+        Токен шлём и заголовком, и `access_token` в query: заголовок — то, что описано
+        в доках, query — то, что достоверно принимается сервером (проверено 401
+        verify.token на фейк-токене). Дублирование безопасно, страхует от того, что
+        одна из схем не сработает. К upload-url (шаг 2) токен НЕ добавляем — он подписан.
+        """
+        p: dict[str, Any] = {"access_token": self._token}
+        if extra:
+            p.update(extra)
+        return p
+
+    async def whoami(self) -> dict[str, Any] | None:
+        """GET /me — проверка, что MAX-токен валиден. Возвращает тело ответа или None."""
+        r = await self._http.get(f"{self._base}/me", params=self._auth())
+        if r.status_code >= 300:
+            log.error("MAX /me failed %s: %s", r.status_code, r.text[:300])
+            return None
+        try:
+            return r.json()
+        except Exception:  # noqa: BLE001
+            return None
+
     async def upload_media(self, kind: str, filename: str, data: bytes, content_type: str) -> dict[str, Any] | None:
         """Загружает один файл, возвращает готовый объект attachment или None при неудаче."""
         up_type = UPLOAD_TYPE.get(kind, "file")
         # шаг 1 — получить upload url
-        r = await self._http.post(f"{self._base}/uploads", params={"type": up_type})
+        r = await self._http.post(f"{self._base}/uploads", params=self._auth({"type": up_type}))
         if r.status_code >= 300:
             log.error("uploads init failed %s: %s", r.status_code, r.text[:400])
             return None
@@ -104,7 +128,7 @@ class MaxClient:
             body["attachments"] = attachments
         if not text and not attachments:
             return True  # нечего слать
-        r = await self._http.post(f"{self._base}/messages", params=params, json=body)
+        r = await self._http.post(f"{self._base}/messages", params=self._auth(params), json=body)
         if r.status_code >= 300:
             log.error("send failed %s: %s", r.status_code, r.text[:500])
             return False
@@ -120,7 +144,7 @@ class MaxClient:
 
     async def delete_message(self, mid: str) -> bool:
         """Удаляет сообщение в MAX по его mid (для очистки тестового поста)."""
-        r = await self._http.delete(f"{self._base}/messages", params={"message_id": mid})
+        r = await self._http.delete(f"{self._base}/messages", params=self._auth({"message_id": mid}))
         ok = r.status_code < 300
         log.info("MAX delete mid=%s -> %s %s", mid, r.status_code, "" if ok else r.text[:300])
         return ok
