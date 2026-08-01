@@ -157,7 +157,8 @@ async def _process(messages: list[Message], dst_chat_id: int) -> None:
             break
     # разметка Telegram → HTML MAX; длинные посты режутся под лимит в 4000 символов
     parts = build_parts(text, entities)
-    parts = append_buttons(parts, _buttons_of(head))
+    buttons = _buttons_of(head)
+    keyboard = maxc.keyboard_attachment(buttons)
 
     attachments: list[dict[str, Any]] = []
     downloaded: list[str] = []
@@ -178,7 +179,15 @@ async def _process(messages: list[Message], dst_chat_id: int) -> None:
     mids: list[str] = []
     try:
         # вложения уходят с первой частью, хвост длинного текста — следом
-        mids = await maxc.send(dst_chat_id, parts[0] if parts else "", attachments, fmt="html")
+        mids = await maxc.send(dst_chat_id, parts[0] if parts else "", attachments,
+                               fmt="html", keyboard=keyboard)
+        if not mids and keyboard:
+            # клавиатуру MAX мог не принять — ссылка из кнопки часто и есть смысл поста,
+            # поэтому вторая попытка без клавиатуры, но со ссылками в тексте
+            log.warning("MAX не принял клавиатуру — повтор со ссылками в тексте")
+            fb = append_buttons(list(parts) or [""], buttons)
+            mids = await maxc.send(dst_chat_id, fb[0], attachments, fmt="html")
+            parts = fb
         ok = bool(mids)
         for tail in parts[1:]:
             more = await maxc.send(dst_chat_id, tail, None, fmt="html")
@@ -256,7 +265,7 @@ async def on_edited_channel_post(m: Message) -> None:
                  m.chat.id, m.message_id)
         return
     text, entities = _text_of(m)
-    parts = append_buttons(build_parts(text, entities), _buttons_of(m))
+    parts = build_parts(text, entities)
     if not parts:
         return
     if await maxc.edit_message(mids[0], parts[0], fmt="html"):

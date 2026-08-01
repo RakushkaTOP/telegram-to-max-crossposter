@@ -120,8 +120,22 @@ class MaxClient:
             return MaxClient._extract_token(res)
         return None
 
+    @staticmethod
+    def keyboard_attachment(buttons: list[tuple[str, str]]) -> dict[str, Any] | None:
+        """Клавиатура MAX из пар (подпись, ссылка).
+
+        MAX кладёт в ряд не больше 3 ссылок-кнопок, поэтому раскладываем по три —
+        иначе он отвергнет всё сообщение целиком.
+        """
+        items = [{"type": "link", "text": t or url, "url": url} for t, url in buttons if url]
+        if not items:
+            return None
+        rows = [items[i:i + 3] for i in range(0, len(items[:210]), 3)][:30]
+        return {"type": "inline_keyboard", "payload": {"buttons": rows}}
+
     def _message_request(self, chat_id: int, text: str, attachments: list[dict[str, Any]] | None,
-                         chat_id_in_query: bool, fmt: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+                         chat_id_in_query: bool, fmt: str | None = None,
+                         keyboard: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         """Собирает (params, body) для POST /messages при выбранном способе адресации."""
         body: dict[str, Any] = {}
         params: dict[str, Any] = {}
@@ -134,20 +148,25 @@ class MaxClient:
             if fmt:
                 # без этого поля MAX показывает теги как обычные символы
                 body["format"] = fmt
-        if attachments:
-            body["attachments"] = attachments
+        atts = list(attachments or [])
+        if keyboard:
+            atts.append(keyboard)  # клавиатура едет тем же списком вложений
+        if atts:
+            body["attachments"] = atts
         return params, body
 
     async def _post_once(self, chat_id: int, text: str,
                          attachments: list[dict[str, Any]] | None,
-                         fmt: str | None = None) -> httpx.Response:
+                         fmt: str | None = None,
+                         keyboard: dict[str, Any] | None = None) -> httpx.Response:
         """POST /messages с ожиданием готовности вложений.
 
         MAX обрабатывает загруженное медиа асинхронно (особенно видео): сразу после
         /uploads токен ещё «сырой», и сервер отвечает 400 attachment.not.ready.
         Это не ошибка, а «подожди» — повторяем, пока не дозреет.
         """
-        params, body = self._message_request(chat_id, text, attachments, self._chat_id_in_query, fmt)
+        params, body = self._message_request(chat_id, text, attachments, self._chat_id_in_query,
+                                             fmt, keyboard)
         delay = 2.0
         for attempt in range(1, self.NOT_READY_ATTEMPTS + 1):
             r = await self._http.post(f"{self._base}/messages", params=params, json=body)
@@ -163,7 +182,7 @@ class MaxClient:
         return r  # недостижимо, но пусть тип будет честным
 
     async def send(self, chat_id: int, text: str, attachments: list[dict[str, Any]] | None,
-                   fmt: str | None = None) -> list[str]:
+                   fmt: str | None = None, keyboard: dict[str, Any] | None = None) -> list[str]:
         """Отправляет пост. Возвращает mid'ы созданных сообщений — пустой список = провал.
 
         Список, а не флаг: mid нужен, чтобы потом применить правку поста, а альбом
@@ -171,7 +190,7 @@ class MaxClient:
         """
         if not text and not attachments:
             return []  # нечего слать
-        r = await self._post_once(chat_id, text, attachments, fmt)
+        r = await self._post_once(chat_id, text, attachments, fmt, keyboard)
         # Проверено на живом API 2026-07-27: chat_id В ТЕЛЕ даёт 400 "Unknown recipient",
         # рабочий способ — query. Если сервер не узнал адресата, пробуем второй способ,
         # чтобы смена формата на их стороне не роняла кросспост молча.
@@ -179,7 +198,7 @@ class MaxClient:
             alt = not self._chat_id_in_query
             log.warning("MAX не узнал адресата (chat_id_in_query=%s) — повтор с chat_id_in_query=%s",
                         self._chat_id_in_query, alt)
-            params, body = self._message_request(chat_id, text, attachments, alt, fmt)
+            params, body = self._message_request(chat_id, text, attachments, alt, fmt, keyboard)
             r = await self._http.post(f"{self._base}/messages", params=params, json=body)
             if r.status_code < 300:
                 self._chat_id_in_query = alt  # запоминаем рабочий способ до конца жизни процесса
@@ -191,7 +210,7 @@ class MaxClient:
             kinds = {a.get("type") for a in attachments}
             log.warning("альбом (%d вложений, типы %s) не принят: %s %s — раскладываю по одному",
                         len(attachments), sorted(k for k in kinds if k), r.status_code, r.text[:200])
-            return await self._send_split(chat_id, text, attachments, fmt)
+            return await self._send_split(chat_id, text, attachments, fmt, keyboard)
         if r.status_code >= 300:
             log.error("send failed %s: %s", r.status_code, r.text[:500])
             return []
@@ -201,11 +220,12 @@ class MaxClient:
         return [mid] if mid else ["?"]
 
     async def _send_split(self, chat_id: int, text: str, attachments: list[dict[str, Any]],
-                          fmt: str | None = None) -> list[str]:
+                          fmt: str | None = None, keyboard: dict[str, Any] | None = None) -> list[str]:
         """Фолбэк для альбома: каждое вложение — отдельным сообщением (текст идёт с первым)."""
         mids: list[str] = []
         for i, att in enumerate(attachments):
-            r = await self._post_once(chat_id, text if i == 0 else "", [att], fmt)
+            r = await self._post_once(chat_id, text if i == 0 else "", [att], fmt,
+                                      keyboard if i == 0 else None)
             if r.status_code >= 300:
                 log.error("split-часть %d/%d не отправлена: %s %s",
                           i + 1, len(attachments), r.status_code, r.text[:300])
