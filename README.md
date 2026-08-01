@@ -107,6 +107,6 @@ MIT — берите, используйте, меняйте.
 
 ## Автор и связь
 
-Кирилл Раценко — Telegram [@RakushkaWolf](https://t.me/RakushkaWolf), GitHub [RakushkaTOP](https://github.com/RakushkaTOP).
+Telegram [@RakushkaWolf](https://t.me/RakushkaWolf), GitHub [RakushkaTOP](https://github.com/RakushkaTOP).
 
 Проект вырос из живой задачи: у онлайн-школы канал в Telegram, аудитория переезжает в MAX, а дублировать посты руками никто не хочет. Пригодился — поставь звезду; сломался — заводи issue или пиши в телеграм.
