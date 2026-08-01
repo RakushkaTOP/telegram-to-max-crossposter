@@ -28,11 +28,18 @@ warn() { printf '\033[1;33m !\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m ✘ %s\033[0m\n' "$*" >&2; exit 1; }
 
 # ── вопросы: читаем с терминала, чтобы работало и через `curl | bash` ───────
+# Наличие /dev/tty проверяем реальной попыткой открыть: по ssh без -t файл
+# «существует и читаем», но открытие падает с ENXIO — [ -r ] тут врёт.
+tty_ok() { { exec 9< /dev/tty; } 2>/dev/null && { exec 9<&-; return 0; }; return 1; }
+
 ask() { # ask "текст" VAR [обязательное]
     local prompt="$1" var="$2" required="${3:-}" val=""
     # значение уже задано переменной окружения — не спрашиваем
     if [ -n "${!var:-}" ]; then return 0; fi
-    [ -r /dev/tty ] || die "Нет терминала для вопросов. Задай $var переменной окружения и перезапусти."
+    if ! tty_ok; then
+        [ -z "$required" ] && return 0  # необязательное — молча пропускаем
+        die "Нет терминала для вопросов. Задай $var переменной окружения и перезапусти."
+    fi
     while :; do
         printf '\033[1m%s\033[0m ' "$prompt" > /dev/tty
         IFS= read -r val < /dev/tty || die "Ввод прерван"
@@ -66,7 +73,7 @@ ok "git есть"
 if [ -z "$DRY_RUN" ] && ! command -v docker >/dev/null 2>&1; then
     warn "Docker не найден."
     ANSWER=""
-    if [ -r /dev/tty ]; then
+    if tty_ok; then
         printf '\033[1mПоставить Docker автоматически (get.docker.com)? [y/N]\033[0m ' > /dev/tty
         IFS= read -r ANSWER < /dev/tty || true
     fi
