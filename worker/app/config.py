@@ -9,6 +9,25 @@ def _clean(v: str | None) -> str:
     return (v or "").strip()
 
 
+def _parse_routes(raw: str) -> dict[int, int]:
+    """Разбирает ROUTES вида "-1001669592486:-72627929529786,-1002xxx:-72yyy".
+
+    Несколько пар нужны, чтобы держать рядом с прод-каналом тестовый: один бот =
+    один polling, второй экземпляр воркера с тем же токеном ловил бы 409 и ронял прод.
+    """
+    routes: dict[int, int] = {}
+    for chunk in raw.replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        src, _, dst = chunk.partition(":")
+        try:
+            routes[int(src.strip())] = int(dst.strip())
+        except ValueError:
+            raise SystemExit(f"ROUTES: не разобрал пару {chunk!r}, нужен формат tg_id:max_id")
+    return routes
+
+
 @dataclass(frozen=True)
 class Config:
     # --- Telegram ---
@@ -23,13 +42,22 @@ class Config:
     max_api_base: str            # база REST API MAX
     max_chat_id_in_query: bool   # слать chat_id в query (рабочий способ) или в теле
 
+    # --- маршруты ---
+    routes: dict[int, int]       # TG-канал -> MAX-канал; пара из TG_SOURCE/MAX_CHAT_ID входит всегда
+
     # --- поведение ---
     album_debounce_ms: int       # сколько ждать сборки альбома
     db_path: str                 # sqlite для дедупа
 
     @staticmethod
     def load() -> "Config":
+        src = int(_clean(os.getenv("TG_SOURCE_CHAT_ID")) or "0")
+        dst = int(_clean(os.getenv("MAX_CHAT_ID")) or "0")
+        # базовая пара задаётся отдельными переменными (как было), ROUTES — только добавка
+        routes = {src: dst} if src and dst else {}
+        routes.update(_parse_routes(_clean(os.getenv("ROUTES"))))
         return Config(
+            routes=routes,
             tg_bot_token=_clean(os.getenv("TG_BOT_TOKEN")),
             tg_source_chat_id=int(_clean(os.getenv("TG_SOURCE_CHAT_ID")) or "0"),
             tg_api_base=_clean(os.getenv("TG_API_BASE")) or "http://bot-api:8081",

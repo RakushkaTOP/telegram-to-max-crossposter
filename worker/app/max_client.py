@@ -36,10 +36,9 @@ class MaxClient:
     # сколько раз ждать, пока MAX дожуёт загруженное видео (attachment.not.ready)
     NOT_READY_ATTEMPTS = 12
 
-    def __init__(self, token: str, base: str, chat_id: int, chat_id_in_query: bool = False) -> None:
+    def __init__(self, token: str, base: str, chat_id_in_query: bool = False) -> None:
         self._token = token
         self._base = base.rstrip("/")
-        self._chat_id = chat_id
         self._chat_id_in_query = chat_id_in_query
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(120.0), headers={"Authorization": token})
 
@@ -58,14 +57,24 @@ class MaxClient:
             return None
 
     async def upload_media(self, kind: str, filename: str, data: bytes, content_type: str) -> dict[str, Any] | None:
-        """Загружает один файл, возвращает готовый объект attachment или None при неудаче."""
+        """Загружает один файл, возвращает готовый объект attachment или None при неудаче.
+
+        Токен вложения MAX отдаёт ПО-РАЗНОМУ (проверено на живом API 2026-08-01):
+          * video / audio — сразу в ответе /uploads, рядом с url; сама заливка уходит
+            на okcdn и отвечает `<retval>1</retval>`, то есть вообще не JSON;
+          * image / file  — в ответе заливки ({"photos": {...: {"token"}}} или {"token"}).
+        Поэтому берём токен из /uploads, если он там есть, и только иначе лезем в ответ
+        заливки. Раньше смотрели лишь во второй — из-за этого НИ ОДНО видео не доезжало.
+        """
         up_type = UPLOAD_TYPE.get(kind, "file")
-        # шаг 1 — получить upload url
+        # шаг 1 — получить upload url (и, для video/audio, сразу токен)
         r = await self._http.post(f"{self._base}/uploads", params={"type": up_type})
         if r.status_code >= 300:
             log.error("uploads init failed %s: %s", r.status_code, r.text[:400])
             return None
-        url = (r.json() or {}).get("url")
+        init = r.json() or {}
+        url = init.get("url")
+        init_token = init.get("token") if isinstance(init.get("token"), str) else None
         if not url:
             log.error("uploads init: нет url в ответе: %s", r.text[:400])
             return None
@@ -73,18 +82,23 @@ class MaxClient:
         files = {"data": (filename, data, content_type)}
         r2 = await self._http.post(url, files=files)
         if r2.status_code >= 300:
+            # MAX принимает аудио только mp3/wav/m4a, а голосовые TG приходят в ogg/opus
+            # и отбиваются 415. Такой файл всё равно доносим — вложением-файлом.
+            if up_type == "audio":
+                log.warning("аудио не принято (%s) — перезаливаю как файл", r2.status_code)
+                return await self.upload_media("document", filename, data, content_type)
             log.error("upload body failed %s: %s", r2.status_code, r2.text[:400])
             return None
-        try:
-            payload = r2.json()
-        except Exception:
-            log.error("upload body: не JSON: %s", r2.text[:400])
-            return None
-        token = self._extract_token(payload)
+        token = init_token
         if not token:
-            log.error("upload body: не нашёл токен в ответе: %s", str(payload)[:600])
+            try:
+                token = self._extract_token(r2.json())
+            except Exception:  # noqa: BLE001
+                log.error("upload body: не JSON и токена в /uploads не было: %s", r2.text[:200])
+                return None
+        if not token:
+            log.error("не нашёл токен вложения: init=%s body=%s", str(init)[:200], r2.text[:300])
             return None
-        # image допускает payload {"token": ...}; video/file/audio — {"token": ...}
         att_type = "image" if up_type == "image" else up_type
         return {"type": att_type, "payload": {"token": token}}
 
@@ -106,29 +120,34 @@ class MaxClient:
             return MaxClient._extract_token(res)
         return None
 
-    def _message_request(self, text: str, attachments: list[dict[str, Any]] | None,
-                         chat_id_in_query: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _message_request(self, chat_id: int, text: str, attachments: list[dict[str, Any]] | None,
+                         chat_id_in_query: bool, fmt: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         """Собирает (params, body) для POST /messages при выбранном способе адресации."""
         body: dict[str, Any] = {}
         params: dict[str, Any] = {}
         if chat_id_in_query:
-            params["chat_id"] = self._chat_id
+            params["chat_id"] = chat_id
         else:
-            body["chat_id"] = self._chat_id
+            body["chat_id"] = chat_id
         if text:
             body["text"] = text
+            if fmt:
+                # без этого поля MAX показывает теги как обычные символы
+                body["format"] = fmt
         if attachments:
             body["attachments"] = attachments
         return params, body
 
-    async def _post_once(self, text: str, attachments: list[dict[str, Any]] | None) -> httpx.Response:
+    async def _post_once(self, chat_id: int, text: str,
+                         attachments: list[dict[str, Any]] | None,
+                         fmt: str | None = None) -> httpx.Response:
         """POST /messages с ожиданием готовности вложений.
 
         MAX обрабатывает загруженное медиа асинхронно (особенно видео): сразу после
         /uploads токен ещё «сырой», и сервер отвечает 400 attachment.not.ready.
         Это не ошибка, а «подожди» — повторяем, пока не дозреет.
         """
-        params, body = self._message_request(text, attachments, self._chat_id_in_query)
+        params, body = self._message_request(chat_id, text, attachments, self._chat_id_in_query, fmt)
         delay = 2.0
         for attempt in range(1, self.NOT_READY_ATTEMPTS + 1):
             r = await self._http.post(f"{self._base}/messages", params=params, json=body)
@@ -143,10 +162,16 @@ class MaxClient:
             delay = min(delay * 1.5, 15.0)
         return r  # недостижимо, но пусть тип будет честным
 
-    async def send(self, text: str, attachments: list[dict[str, Any]] | None) -> bool:
+    async def send(self, chat_id: int, text: str, attachments: list[dict[str, Any]] | None,
+                   fmt: str | None = None) -> list[str]:
+        """Отправляет пост. Возвращает mid'ы созданных сообщений — пустой список = провал.
+
+        Список, а не флаг: mid нужен, чтобы потом применить правку поста, а альбом
+        при фолбэке разъезжается на несколько сообщений.
+        """
         if not text and not attachments:
-            return True  # нечего слать
-        r = await self._post_once(text, attachments)
+            return []  # нечего слать
+        r = await self._post_once(chat_id, text, attachments, fmt)
         # Проверено на живом API 2026-07-27: chat_id В ТЕЛЕ даёт 400 "Unknown recipient",
         # рабочий способ — query. Если сервер не узнал адресата, пробуем второй способ,
         # чтобы смена формата на их стороне не роняла кросспост молча.
@@ -154,7 +179,7 @@ class MaxClient:
             alt = not self._chat_id_in_query
             log.warning("MAX не узнал адресата (chat_id_in_query=%s) — повтор с chat_id_in_query=%s",
                         self._chat_id_in_query, alt)
-            params, body = self._message_request(text, attachments, alt)
+            params, body = self._message_request(chat_id, text, attachments, alt, fmt)
             r = await self._http.post(f"{self._base}/messages", params=params, json=body)
             if r.status_code < 300:
                 self._chat_id_in_query = alt  # запоминаем рабочий способ до конца жизни процесса
@@ -166,28 +191,32 @@ class MaxClient:
             kinds = {a.get("type") for a in attachments}
             log.warning("альбом (%d вложений, типы %s) не принят: %s %s — раскладываю по одному",
                         len(attachments), sorted(k for k in kinds if k), r.status_code, r.text[:200])
-            return await self._send_split(text, attachments)
+            return await self._send_split(chat_id, text, attachments, fmt)
         if r.status_code >= 300:
             log.error("send failed %s: %s", r.status_code, r.text[:500])
-            return False
+            return []
+        mid = self._mid_of(r)
         log.info("MAX ← отправлено (attachments=%d, text=%d) mid=%s",
-                 len(attachments or []), len(text or ""), self._mid_of(r))
-        return True
+                 len(attachments or []), len(text or ""), mid)
+        return [mid] if mid else ["?"]
 
-    async def _send_split(self, text: str, attachments: list[dict[str, Any]]) -> bool:
+    async def _send_split(self, chat_id: int, text: str, attachments: list[dict[str, Any]],
+                          fmt: str | None = None) -> list[str]:
         """Фолбэк для альбома: каждое вложение — отдельным сообщением (текст идёт с первым)."""
-        sent = 0
+        mids: list[str] = []
         for i, att in enumerate(attachments):
-            r = await self._post_once(text if i == 0 else "", [att])
+            r = await self._post_once(chat_id, text if i == 0 else "", [att], fmt)
             if r.status_code >= 300:
                 log.error("split-часть %d/%d не отправлена: %s %s",
                           i + 1, len(attachments), r.status_code, r.text[:300])
                 continue
-            sent += 1
-            log.info("MAX ← отправлена часть %d/%d mid=%s", i + 1, len(attachments), self._mid_of(r))
-        if sent:
-            log.info("альбом доставлен по частям: %d из %d", sent, len(attachments))
-        return sent > 0
+            mid = self._mid_of(r)
+            if mid:
+                mids.append(mid)
+            log.info("MAX ← отправлена часть %d/%d mid=%s", i + 1, len(attachments), mid)
+        if mids:
+            log.info("альбом доставлен по частям: %d из %d", len(mids), len(attachments))
+        return mids
 
     @staticmethod
     def _mid_of(r: httpx.Response) -> str | None:
@@ -197,6 +226,21 @@ class MaxClient:
             return (msg.get("body") or {}).get("mid") or msg.get("mid")
         except Exception:  # noqa: BLE001
             return None
+
+    async def edit_message(self, mid: str, text: str, fmt: str | None = None) -> bool:
+        """Правит уже отправленное сообщение MAX (PUT /messages?message_id=...).
+
+        Вложения не трогаем: правка поста в Telegram почти всегда про текст, а
+        передача attachments заново заставила бы перезаливать медиа целиком.
+        """
+        body: dict[str, Any] = {"text": text}
+        if fmt:
+            body["format"] = fmt
+        r = await self._http.put(f"{self._base}/messages", params={"message_id": mid}, json=body)
+        ok = r.status_code < 300
+        if not ok:
+            log.error("MAX edit mid=%s failed %s: %s", mid, r.status_code, r.text[:300])
+        return ok
 
     async def delete_message(self, mid: str) -> bool:
         """Удаляет сообщение в MAX по его mid (для очистки тестового поста)."""
