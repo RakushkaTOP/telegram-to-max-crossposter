@@ -73,11 +73,13 @@ class Config:
         )
 
     def require(self) -> None:
+        # ID каналов намеренно НЕ обязательны: без них воркер стартует в режиме
+        # обнаружения — пишет chat_id каждого увиденного поста в лог, чтобы владелец
+        # мог узнать ID своих каналов (см. README). Падать здесь нельзя, иначе до
+        # этой подсказки никто не доберётся.
         missing = [k for k, v in {
             "TG_BOT_TOKEN": self.tg_bot_token,
-            "TG_SOURCE_CHAT_ID": self.tg_source_chat_id,
             "MAX_TOKEN": self.max_token,
-            "MAX_CHAT_ID": self.max_chat_id,
         }.items() if not v]
         if missing:
             raise SystemExit("Не заданы обязательные переменные: " + ", ".join(missing))

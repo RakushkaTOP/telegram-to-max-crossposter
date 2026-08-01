@@ -282,6 +282,10 @@ async def main() -> None:
     log.info("старт: бот @%s, api=%s, маршрутов %d", me.username, cfg.tg_api_base, len(cfg.routes))
     for src, dst in cfg.routes.items():
         log.info("маршрут: TG %s → MAX %s", src, dst)
+    if not cfg.routes:
+        log.warning("маршруты не заданы — режим обнаружения: опубликуй пост в своём "
+                    "TG-канале, его chat_id появится здесь; затем впиши TG_SOURCE_CHAT_ID "
+                    "и MAX_CHAT_ID в .env и перезапусти")
     # самопроверка MAX-токена: чтобы при первом тесте сразу видеть, чей токен не тот
     who = await maxc.whoami()
     if who:
