@@ -10,7 +10,7 @@ def _clean(v: str | None) -> str:
 
 
 def _parse_routes(raw: str) -> dict[int, int]:
-    """Разбирает ROUTES вида "-1001669592486:-72627929529786,-1002xxx:-72yyy".
+    """Разбирает ROUTES вида "-1001234567890:-72123456789,-1009876543210:-72987654321".
 
     Несколько пар нужны, чтобы держать рядом с прод-каналом тестовый: один бот =
     один polling, второй экземпляр воркера с тем же токеном ловил бы 409 и ронял прод.
@@ -31,14 +31,14 @@ def _parse_routes(raw: str) -> dict[int, int]:
 @dataclass(frozen=True)
 class Config:
     # --- Telegram ---
-    tg_bot_token: str            # токен бота @vastu_syncbot (BotFather)
-    tg_source_chat_id: int       # ID канала-источника (напр. -1001669592486)
+    tg_bot_token: str            # токен бота-читателя от BotFather
+    tg_source_chat_id: int       # ID канала-источника (напр. -1001234567890)
     tg_api_base: str             # адрес локального Bot API сервера
     tg_files_root: str           # где на диске лежат файлы локального Bot API (общий volume)
 
     # --- MAX ---
     max_token: str               # access-токен бота MAX
-    max_chat_id: int             # ID канала-приёмника в MAX (напр. -72627929529786)
+    max_chat_id: int             # ID канала-приёмника в MAX (напр. -72123456789)
     max_api_base: str            # база REST API MAX
     max_chat_id_in_query: bool   # слать chat_id в query (рабочий способ) или в теле
 
@@ -64,7 +64,8 @@ class Config:
             tg_files_root=_clean(os.getenv("TG_FILES_ROOT")) or "/var/lib/telegram-bot-api",
             max_token=_clean(os.getenv("MAX_TOKEN")),
             max_chat_id=int(_clean(os.getenv("MAX_CHAT_ID")) or "0"),
-            max_api_base=_clean(os.getenv("MAX_API_BASE")) or "https://botapi.max.ru",
+            # актуальный домен с 2026-07-19; botapi.max.ru и platform-api.max.ru устарели
+            max_api_base=_clean(os.getenv("MAX_API_BASE")) or "https://platform-api2.max.ru",
             # по умолчанию true: chat_id в теле MAX отвергает как "Unknown recipient" (проверено 2026-07-27)
             max_chat_id_in_query=(_clean(os.getenv("MAX_CHAT_ID_IN_QUERY")) or "true").lower() in ("1", "true", "yes"),
             album_debounce_ms=int(_clean(os.getenv("ALBUM_DEBOUNCE_MS")) or "1500"),
